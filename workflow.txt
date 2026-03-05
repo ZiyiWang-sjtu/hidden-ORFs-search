@@ -1,0 +1,10 @@
+#Before starting, please ensure the following environment is installed: Python 3.10 or higher, Biopython, Pandas, TQDM, and BLASTn.
+conda activate YOUR_ENV
+
+python3 library_of_features/SnapGene_Feature_Extractor.py --input library_of_features/features_terminator_from_snapgene library_of_features/features_promoter_from_snapgene library_of_features/features_polya_from_snapgene
+
+python3 input/plasmid_json_filter.py --input input/addgene-plasmids-sequences.json --fasta input/target_gene.fa --output input/filtered_target_plasmids.json 
+
+python3 hidden_orf_search/hidden_orf_search.py --json input/filtered_target_plasmids.json --fa input/target_gene.fa --features library_of_features/feature_library.csv --min_aa 100 --max_prom 10000 --max_poly 10000 --out results_analysis/min_aa 100/results.csv
+
+Rscript results_analysis/result_analysis.R
