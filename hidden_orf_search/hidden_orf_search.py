@@ -98,13 +98,13 @@ def load_feature_library(csv_path: str) -> Dict[str, List[Dict]]:
         if not seq: continue
         
         entry = {"name": f_name, "seq": seq}
-        if 'promoter' in f_type: 
+        if 'transcription_initiation' in f_type:
             feature_db["promoter"].append(entry)
-        elif any(kw in f_type for kw in ['polya', 'term', 'stop', 'ltr']): 
+        elif 'transcription_termination' in f_type:
             feature_db["polyA"].append(entry)
     return feature_db
 
-# Map feature sequences onto circular plasmid
+# Map feature sequences onto circular plasmid (Now preserving BLAST strand information)
 def map_features_to_plasmid(plasmid_seq: str, feature_entries: List[Dict], threshold: float) -> List[Dict]:
     L = len(plasmid_seq)
     dseq = plasmid_seq + plasmid_seq 
@@ -119,11 +119,11 @@ def map_features_to_plasmid(plasmid_seq: str, feature_entries: List[Dict], thres
                 mapped_results.append({
                     "name": entry["name"],
                     "start": h["start"],
-                    "end": h["end"]
-                })
+                    "end": h["end"],
+                    "strand": h["strand"]                  })
     return mapped_results
 
-# Extract full plasmid sequence from JSON
+# Extract full plasmid sequence from JSON (Kept exactly as original)
 def extract_plasmid_seq(plasmid: Dict) -> str:
     seqs_dict = plasmid.get("sequences", {})
     for key in ["public_addgene_full_sequences", "public_user_full_sequences", "full_sequences"]:
@@ -179,33 +179,83 @@ def classify_overlap(orf: Tuple[int, int], target: Tuple[int, int]) -> str:
     if a <= c and b >= d: return "spanning_target_gene"
     return "partial_target_gene"
 
-# Calculate upstream circular distance
-def get_circular_upstream_dist(feature_end, orf_start, L):
-    if orf_start >= feature_end:
-        return orf_start - feature_end
-    else:
-        return orf_start + (L - feature_end)
 
-# Calculate downstream circular distance
-def get_circular_downstream_dist(orf_start, feature_start, L):
-    if feature_start >= orf_start:
-        return feature_start - orf_start
-    else:
-        return (L - orf_start) + feature_start
-
-# Find closest circular feature (upstream or downstream)
-def find_closest_circular_feature(feature_list, pos_mod, L, mode='upstream'):
+# Find the closest same-strand regulatory element on a circular plasmid
+def find_closest_circular_regulatory_feature(feature_list: List[Dict], orf_pos_mod: int, L: int, strand: str, mode: str = 'upstream') -> Tuple[Dict, int]:
     if not feature_list: return None, None
+    
+    same_strand_features = [f for f in feature_list if f.get("strand") == strand]
+    if not same_strand_features: return None, None
+    
     best_feat, min_dist = None, float('inf')
-    for f in feature_list:
-        if mode == 'upstream':
-            d = get_circular_upstream_dist(f["end"], pos_mod, L)
-        else:
-            d = get_circular_downstream_dist(pos_mod, f["start"], L)
+    for f in same_strand_features:
+        f_start_mod = f["start"] % L
+        f_end_mod = f["end"] % L
+        
+        if strand == "+":
+            if mode == 'upstream':
+                if orf_pos_mod >= f_end_mod:
+                    d = orf_pos_mod - f_end_mod
+                else:
+                    d = orf_pos_mod + (L - f_end_mod)
+            else:
+                if f_start_mod >= orf_pos_mod:
+                    d = f_start_mod - orf_pos_mod
+                else:
+                    d = f_start_mod + (L - orf_pos_mod)
+        else: 
+            if mode == 'upstream':
+                if f_start_mod >= orf_pos_mod:
+                    d = f_start_mod - orf_pos_mod
+                else:
+                    d = f_start_mod + (L - orf_pos_mod)
+            else:
+                if orf_pos_mod >= f_end_mod:
+                    d = orf_pos_mod - f_end_mod
+                else:
+                    d = orf_pos_mod + (L - f_end_mod)
+                    
         if d < min_dist:
             min_dist = d
             best_feat = f
-    return best_feat, min_dist
+            
+    return best_feat, (min_dist if min_dist != float('inf') else None)
+
+# Check whether a transcription termination element lies between the initiation element and the ORF
+def has_termination_between_promoter_and_orf(promoter, orf_pos_mod, terminator_list, L, strand):
+    if promoter is None:
+        return False
+
+    same_strand_terms = [
+        t for t in terminator_list
+        if t.get("strand") == strand
+    ]
+
+    if strand == "+":
+        promoter_end = promoter["end"] % L
+
+        for t in same_strand_terms:
+            term_start = t["start"] % L
+
+            d_term = (term_start - promoter_end) % L
+            d_orf = (orf_pos_mod - promoter_end) % L
+
+            if 0 < d_term < d_orf:
+                return True
+
+    else:
+        promoter_start = promoter["start"] % L
+
+        for t in same_strand_terms:
+            term_end = t["end"] % L
+
+            d_term = (promoter_start - term_end) % L
+            d_orf = (promoter_start - orf_pos_mod) % L
+
+            if 0 < d_term < d_orf:
+                return True
+
+    return False
 
 # Analyze ORFs relative to target gene and regulatory elements
 def plasmid_orf_analyzer(p_seq, t_seq, proms_mapped, polys_mapped, min_aa, max_dist_prom, max_dist_poly, threshold):
@@ -222,7 +272,9 @@ def plasmid_orf_analyzer(p_seq, t_seq, proms_mapped, polys_mapped, min_aa, max_d
                 "strand": h["strand"]
             })
 
-    orfs, results = scan_orfs(dseq, L, min_aa), []
+    orfs = scan_orfs(dseq, L, min_aa)
+    hidden_orfs_data = []
+    
     for orf in orfs:
         start_dseq, end_dseq = orf["start"], orf["end"]
         overlap_status = "outside_target_gene"
@@ -243,23 +295,46 @@ def plasmid_orf_analyzer(p_seq, t_seq, proms_mapped, polys_mapped, min_aa, max_d
                 prefix = "+" if orf["strand"] == g["strand"] else "-"
                 tg_frame = f"{prefix}{display_phase}"
                 break
-
-        pos_mod = start_dseq % L
-        closest_p, dist_p = find_closest_circular_feature(proms_mapped, pos_mod, L, 'upstream')
-        closest_a, dist_a = find_closest_circular_feature(polys_mapped, end_dseq % L, L, 'downstream')
-        
-        has_promoter_nearby = (dist_p is not None and dist_p <= max_dist_prom)
-        has_polyA_nearby = (dist_a is not None and dist_a <= max_dist_poly)
-        
-        expressible = (overlap_status != "outside_target_gene") and has_promoter_nearby and has_polyA_nearby
-        
-        is_risk = False
-        if expressible:
-            if tg_frame != "+1":
-                is_risk = True
-        
-        results.append({
+                
+        hidden_orfs_data.append({
+            "orf": orf,
+            "start_dseq": start_dseq,
+            "end_dseq": end_dseq,
             "TGframe": tg_frame,
+            "overlap": overlap_status
+        })
+
+    results = []
+    
+    for item in hidden_orfs_data:
+        orf = item["orf"]
+        start_dseq = item["start_dseq"]
+        end_dseq = item["end_dseq"]
+        strand = orf["strand"]
+        overlap_status = item["overlap"]
+        
+        if strand == "+":
+            promoter_search_pos = start_dseq % L  
+            terminator_search_pos = end_dseq % L  
+        else:
+            promoter_search_pos = end_dseq % L    
+            terminator_search_pos = start_dseq % L  
+            
+        closest_p, dist_p = find_closest_circular_regulatory_feature(proms_mapped, promoter_search_pos, L, strand, 'upstream')
+        closest_t, dist_t = find_closest_circular_regulatory_feature(polys_mapped, terminator_search_pos, L, strand, 'downstream')
+        
+        promoter_blocked = has_termination_between_promoter_and_orf(closest_p,promoter_search_pos,polys_mapped,L,strand)
+
+        has_promoter_nearby = (dist_p is not None and dist_p <= max_dist_prom and not promoter_blocked)
+        has_terminator_nearby = (dist_t is not None and dist_t <= max_dist_poly)
+        
+        is_hidden_ORFs = (overlap_status != "outside_target_gene")
+        
+        is_putatively_expressible_hidden_ORFs = is_hidden_ORFs and has_promoter_nearby and has_terminator_nearby
+        
+        pos_mod = start_dseq % L
+        results.append({
+            "TGframe": item["TGframe"],
             "orf_frame": orf["frame"],   
             "strand": orf["strand"], 
             "start": pos_mod + 1, 
@@ -267,20 +342,24 @@ def plasmid_orf_analyzer(p_seq, t_seq, proms_mapped, polys_mapped, min_aa, max_d
             "length_aa": orf["length_aa"],
             "overlap": overlap_status,
             "has_promoter": has_promoter_nearby,
-            "has_polyA": has_polyA_nearby,
+            "has_terminator": has_terminator_nearby,
             "dist_promoter": dist_p if dist_p is not None else "-",
-            "dist_polyA": dist_a if dist_a is not None else "-",
-            "expressible": expressible,
-            "is_risk": is_risk
+            "dist_terminator": dist_t if dist_t is not None else "-",
+            "is_hidden_ORFs": is_hidden_ORFs,
+            "is_putatively_expressible_hidden_ORFs": is_putatively_expressible_hidden_ORFs
         })
     return results
 
-# Export results to CSV
+# Export results to CSV with updated Two-Stage Column Headers
 def export_to_csv(data: List[Dict], filename: str):
     if not data: return
     cols = [
-        "plasmid_id", "plasmid_name", "TGframe", "orf_frame", "strand", "start", "stop", "length_aa", 
-        "overlap", "has_promoter", "has_polyA", "dist_promoter", "dist_polyA", "expressible", "is_risk"
+        "plasmid_id", "plasmid_name", 
+        # STAGE 1: DNA-level Hidden ORFs
+        "TGframe", "orf_frame", "strand", "start", "stop", "length_aa", "overlap", 
+        # STAGE 2: Putatively Expressible Hidden ORFs
+        "has_promoter", "has_terminator", "dist_promoter", "dist_terminator", 
+        "is_hidden_ORFs", "is_putatively_expressible_hidden_ORFs"
     ]
     with open(filename, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=cols)
@@ -313,7 +392,7 @@ if __name__ == "__main__":
     parser.add_argument("--identity", type=float, default=96.0)
     parser.add_argument("--min_aa", type=int, default=100)
     parser.add_argument("--max_prom", type=int, default=10000, help="Maximum distance from the promoter")
-    parser.add_argument("--max_poly", type=int, default=10000, help="Maximum distance from the polyA")
+    parser.add_argument("--max_poly", type=int, default=10000, help="Maximum distance from the terminator")
     parser.add_argument("--out", type=str, default="results.csv")
     parser.add_argument("--workers", type=int, default=os.cpu_count())
     args = parser.parse_args()
@@ -343,3 +422,4 @@ if __name__ == "__main__":
     print("\nSave data...")
     export_to_csv(all_results, args.out)
     print(f"Analysis complete! File saved to:: {args.out}")
+
