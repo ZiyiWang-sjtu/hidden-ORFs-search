@@ -55,6 +55,8 @@ Folders containing .dna files exported from SnapGene with annotated features. Pl
 python3 SnapGene_Feature_Extractor.py --input features_terminator_from_snapgene features_promoter_from_snapgene features_polya_from_snapgene 
 ```
 
+We additionally manually curated the transcriptional regulatory elements that are functional in mammalian cells. The curated list is provided in mammalian_feature_library.csv.
+
 ## 3. Hidden ORFs Search
 
 This script performs a comprehensive analysis of plasmid sequences, mapping regulatory features and scanning for expressible ORFs.
@@ -96,6 +98,15 @@ Each ORF is classified based on its overlap with the target gene:
 - spanning_target_gene: Overlaps the entire GOI.
 - partial_target_gene: Partial overlap.
 - outside_target_gene: No overlap.
+
+> [!NOTE]
+> **This pipeline supports two analysis modes:**
+>
+> **1. Hidden ORFs (DNA-level analysis)**  
+> This mode identifies all ORFs that exist at the DNA sequence level based solely on canonical translation signals (an **ATG** start codon and an in-frame stop codon). No transcriptional regulatory elements are considered in this analysis.
+>
+> **2. Putatively Expressible Hidden ORFs (Transcription-aware analysis)**  
+> This mode further evaluates whether a Hidden ORF is potentially transcribable by requiring both an upstream **transcription initiation element** and a downstream **transcription termination element** on the same strand and in the correct transcriptional orientation.
 
 ### 3.5 Feature mapping and distance calculation
 
